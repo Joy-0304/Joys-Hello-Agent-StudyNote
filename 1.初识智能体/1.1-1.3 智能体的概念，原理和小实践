@@ -1,0 +1,265 @@
+# 1.1 什么是智能体
+
+简单地说，智能体可以被抽象成下图：
+![](1.1 Picture/WhatIsAgent)
+但需要注意，对于智能体而言，**主动性**是很重要的，否则和严格执行预设指令的程序就区别不大了。即，不依赖预设，通过和环境交互来主动进行学习。
+
+现在我们探讨的Agent主要都是基于LLM的。LLM 智能体可以直接处理高层级、模糊且充满上下文信息的自然语言指令。或者直观地说，相较于以往的智能体，LLM智能体能更好地处理模糊的自然语言指令，和人的交互性更好。
+
+# 1.2 智能体的构成和运作环境
+
+一般用PEAS模型描述agent的任务环境（以智能旅行助手为例子）：
+
+| 维度  | 描述  |
+| :------------: | :------------: |
+| Performance性能度量  | 在预算和时间内，最大化用户满意度和行程合理性（belike在预算和时间这两个constraints下对目标求最大值）  |
+| Environment环境  | 飞机火车酒店等预定网站、地图服务、天气预报API等网络服务（也就是获取信息的来源）  |
+| Actuators执行器  | 调用API的函数，向用户界面生成和显示格式化文本（获取信息，用用户能够理解的方式生成内容）  |
+| Sensors传感器  | 解析API返回的函数（如JSON，HTML），读取用户输入的自然语言  |
+
+此外，环境还可能存在若干复杂特性，这些特性会影响agent的设计：
+
+|  特性 | 描述 | 对Agent的要求  |
+| :------------: | :------------: |  :------------: |
+| 环境部分可观察| 无法一次获得全部信息  |具备记忆（记住已查询过的航线）和探索（尝试不同的查询日期）的能力  |
+| 行动结果并非总是确定  |有的环境是随机的| 具备处理不确定性、监控变化和及时决策的能力  |
+| 多智能体环境  | 存在其他行动者，他们的行动会改变智能体所处环境  | 快速响应和策略选择  |
+| 序贯且动态的环境  | 当前行动影响未来环境；决策时环境可能发生变化  |  快速灵活地适应 |
+
+## 智能体的运行机制
+
+感知->思考->行动->观察->感知....
+
+观察是在环境变化后的反馈。
+
+例子：
+```
+Thought: 用户想知道北京的天气。我需要调用天气查询工具。
+Action: get_weather("北京") //返回值可能包含不需要的冗余信息，并且格式不符合自然语言习惯
+
+Observation: 北京当前天气为晴，气温25摄氏度，微风。//相当于传感器，把原始输出处理成自然文本
+```
+
+# 1.3 动手体验
+
+> 为了能从 Python 程序中访问网络 API，我们需要一个 HTTP 库。requests是 Python 社区中最流行、最易用的选择。tavily-python是一个强大的 AI 搜索 API 客户端，用于获取实时的网络搜索结果，可以在官网注册后获取 API。openai是 OpenAI 官方提供的 Python SDK，用于调用 GPT 等大语言模型服务。
+
+
+```python
+# 指令模板
+TAVILY_API_KEY = 'tvly-dev-xxxxxxx' # 地址：https://www.tavily.com/
+YOUR_API_KEY = 'ms-xxxxxx'
+
+AGENT_SYSTEM_PROMPT = """
+你是一个智能旅行助手。你的任务是分析用户的请求，并使用可用工具一步步地解决问题。
+
+# 可用工具:
+- `get_weather(city: str)`: 查询指定城市的实时天气。
+- `get_attraction(city: str, weather: str)`: 根据城市和天气搜索推荐的旅游景点。
+
+# 行动格式:
+你的回答必须严格遵循以下格式。首先是你的思考过程，然后是你要执行的具体行动，每次回复只输出一对Thought-Action：
+Thought: [这里是你的思考过程和下一步计划]
+Action: [这里是你要调用的工具，格式为 function_name(arg_name="arg_value")]
+
+# 任务完成:
+当你收集到足够的信息，能够回答用户的最终问题时，你必须在`Action:`字段后使用 `finish(answer="...")` 来输出最终答案。
+
+请开始吧！
+"""
+
+# 工具 1：查询真实天气
+
+import requests
+import json
+
+
+def get_weather(city: str) -> str:
+  """
+  调用 wttr.in 查询真实的天气信息；以JSON格式返回
+  """
+  # API端点，我们请求JSON格式的数据
+  url = f"https://wttr.in/{city}?format=j1"
+
+  try:
+    # 发起网络请求
+    response = requests.get(url)
+    # 检查响应状态码是否为200 (成功)
+    response.raise_for_status()
+    # 解析返回的JSON数据
+    data = response.json()
+
+    # 提取当前天气状况
+    current_condition = data['current_condition'][0]
+    weather_desc = current_condition['weatherDesc'][0]['value']
+    temp_c = current_condition['temp_C']
+
+    # 格式化成自然语言返回
+    return f"{city}当前天气:{weather_desc}，气温{temp_c}摄氏度"
+
+  except requests.exceptions.RequestException as e:
+    # 处理网络错误
+    return f"错误:查询天气时遇到网络问题 - {e}"
+  except (KeyError, IndexError) as e:
+    # 处理数据解析错误
+    return f"错误:解析天气数据失败，可能是城市名称无效 - {e}"
+
+
+# 工具 2：搜索并推荐旅游景点
+
+import os
+from tavily import TavilyClient
+
+
+def get_attraction(city: str, weather: str) -> str:
+  """
+  根据城市和天气，使用Tavily Search API搜索并返回优化后的景点推荐。
+  """
+  # 1. 从环境变量中读取API密钥
+  api_key = TAVILY_API_KEY  # os.environ.get("TAVILY_API_KEY")
+  if not api_key:
+    return "错误:未配置TAVILY_API_KEY环境变量。"
+
+  # 2. 初始化Tavily客户端
+  tavily = TavilyClient(api_key=api_key)
+
+  # 3. 构造一个精确的查询
+  query = f"'{city}' 在'{weather}'天气下最值得去的旅游景点推荐及理由"
+
+  try:
+    # 4. 调用API，include_answer=True会返回一个综合性的回答
+    response = tavily.search(query=query, search_depth="basic", include_answer=True)
+
+    # 5. Tavily返回的结果已经非常干净，可以直接使用
+    # response['answer'] 是一个基于所有搜索结果的总结性回答
+    if response.get("answer"):
+      return response["answer"]
+
+    # 如果没有综合性回答，则格式化原始结果
+    formatted_results = []
+    for result in response.get("results", []):
+      formatted_results.append(f"- {result['title']}: {result['content']}")
+
+    if not formatted_results:
+      return "抱歉，没有找到相关的旅游景点推荐。"
+
+    return "根据搜索，为您找到以下信息:\n" + "\n".join(formatted_results)
+
+  except Exception as e:
+    return f"错误:执行Tavily搜索时出现问题 - {e}"
+
+
+# 将所有工具函数放入一个字典，方便后续调用
+available_tools = {
+  "get_weather"   : get_weather,
+  "get_attraction": get_attraction,
+}
+
+# 接入大语言模型
+
+from openai import OpenAI
+
+
+class OpenAICompatibleClient:
+  """
+  一个用于调用任何兼容OpenAI接口的LLM服务的客户端。
+  """
+
+  def __init__(self, model: str, api_key: str, base_url: str):
+    self.model = model
+    self.client = OpenAI(api_key=api_key, base_url=base_url)
+
+  def generate(self, prompt: str, system_prompt: str) -> str:
+    """调用LLM API来生成回应。"""
+    print("正在调用大语言模型...")
+    try:
+      messages = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': prompt}
+      ]
+      response = self.client.chat.completions.create(
+          model=self.model,
+          messages=messages,
+          stream=False
+      )
+      answer = response.choices[0].message.content
+      print("大语言模型响应成功。")
+      return answer
+    except Exception as e:
+      print(f"调用LLM API时发生错误: {e}")
+      return "错误:调用语言模型服务时出错。"
+
+
+# 1.3.3 执行行动循环
+
+import re
+
+# --- 1. 配置LLM客户端 ---
+# 请根据您使用的服务，将这里替换成对应的凭证和地址
+API_KEY = YOUR_API_KEY  #os.environ.get("YOUR_API_KEY")  # YOUR_API_KEY"
+BASE_URL = 'https://api-inference.modelscope.cn/v1/'  #os.environ.get("YOUR_BASE_URL")  # "YOUR_BASE_URL" 参考 https://modelscope.cn/my/myaccesstoken
+MODEL_ID = 'Qwen/Qwen2.5-Coder-32B-Instruct'  #os.environ.get("YOUR_MODEL_ID")  # "YOUR_MODEL_ID"
+# TAVILY_API_KEY = TAVILY_API_KEY# os.environ.get("TAVILY_API_KEY")  # "YOUR_Tavily_KEY"
+os.environ['TAVILY_API_KEY'] = TAVILY_API_KEY  #"YOUR_TAVILY_API_KEY"
+
+llm = OpenAICompatibleClient(
+    model=MODEL_ID,
+    api_key=API_KEY,
+    base_url=BASE_URL
+)
+
+# --- 2. 初始化 ---
+# user_prompt = "你好，请帮我查询一下今天北京的天气，然后根据天气推荐一个合适的旅游景点。"
+user_prompt = "你好，请帮我查询一下今天上海的天气，然后根据天气推荐一个合适的旅游景点。"
+prompt_history = [f"用户请求: {user_prompt}"]
+
+print(f"用户输入: {user_prompt}\n" + "=" * 40)
+
+# --- 3. 运行主循环 ---
+for i in range(5):  # 设置最大循环次数
+  print(f"--- 循环 {i + 1} ---\n")
+
+  # 3.1. 构建Prompt
+  full_prompt = "\n".join(prompt_history)
+
+  # 3.2. 调用LLM进行思考
+  llm_output = llm.generate(full_prompt, system_prompt=AGENT_SYSTEM_PROMPT)
+  # 模型可能会输出多余的Thought-Action，需要截断
+  match = re.search(r'(Thought:.*?Action:.*?)(?=\n\s*(?:Thought:|Action:|Observation:)|\Z)', llm_output, re.DOTALL)
+  if match:
+    truncated = match.group(1).strip()
+    if truncated != llm_output.strip():
+      llm_output = truncated
+      print("已截断多余的 Thought-Action 对")
+  print(f"模型输出:\n{llm_output}\n")
+  prompt_history.append(llm_output)
+
+  # 3.3. 解析并执行行动
+  action_match = re.search(r"Action: (.*)", llm_output, re.DOTALL)
+  if not action_match:
+    print("解析错误:模型输出中未找到 Action。")
+    break
+  action_str = action_match.group(1).strip()
+
+  if action_str.startswith("finish"):
+    final_answer = re.search(r'finish\(answer="(.*)"\)', action_str).group(1)
+    print(f"任务完成，最终答案: {final_answer}")
+    break
+
+  tool_name = re.search(r"(\w+)\(", action_str).group(1)
+  args_str = re.search(r"\((.*)\)", action_str).group(1)
+  kwargs = dict(re.findall(r'(\w+)="([^"]*)"', args_str))
+
+  if tool_name in available_tools:
+    observation = available_tools[tool_name](**kwargs)
+  else:
+    observation = f"错误:未定义的工具 '{tool_name}'"
+
+  # 3.4. 记录观察结果
+  observation_str = f"Observation: {observation}"
+  print(f"{observation_str}\n" + "=" * 40)
+  prompt_history.append(observation_str)
+
+```
+
+
